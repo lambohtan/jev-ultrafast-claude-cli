@@ -37,24 +37,28 @@ generate a few short strings per run.
 
 If you already have Claude Code, you already have a model that can write those strings.
 
-So this fork adds **[`scripts/claude_cli_shim.py`](scripts/claude_cli_shim.py)**: an
+So this fork adds **[`jev_ultrafast/claude_shim.py`](jev_ultrafast/claude_shim.py)**: an
 OpenAI-compatible `/chat/completions` server on `127.0.0.1`, backed by the local `claude` CLI. It
 speaks only the slice of the API that jev-ultrafast actually uses — `model`, one system message, one
 user message, and a JSON-object reply — so the agent loop cannot tell the difference. Sampling,
-reasoning, and streaming parameters are ignored. Nothing else in the repository changes, which keeps
-pulling upstream clean.
+reasoning, and streaming parameters are ignored.
 
-### Use it
+The helper is a dependency of the agent, not a tool you operate beside it, so the package owns its
+lifecycle. Against upstream that is one new module, one call in
+[`agent.py`](jev_ultrafast/agent.py), and one console script in `pyproject.toml` — small enough that
+pulling upstream stays clean.
 
-Start the shim and leave it running:
+### Run it
+
+Install, put your keys in `.env`, and point the text helper at the shim:
 
 ```bash
-python scripts/claude_cli_shim.py
+uv sync
+cp .env.example .env
 ```
 
-Then point the text helper at it in `.env`:
-
 ```bash
+TYPESAFE_API_KEY=...       # still required: this fork replaces the text helper, not the policy
 TEXT_MODEL_BASE_URL=http://127.0.0.1:8899/v1
 TEXT_MODEL=haiku           # a name the claude CLI accepts, not an OpenRouter slug
 TEXT_MODEL_API_KEY=unused  # never sent anywhere, but it must be set
@@ -65,13 +69,47 @@ slug like `inception/mercury-2.5` will fail. And `TEXT_MODEL_API_KEY` has to be 
 [`model.py`](jev_ultrafast/model.py) refuses `TYPE_TEXT` without it — that guard exists so no field
 text is ever silently guessed — but the shim ignores the value.
 
+That is the whole setup. Nothing needs starting by hand:
+
+```bash
+uv run --env-file .env python examples/run.py \
+    --url https://duckduckgo.com/ --goal 'Search for "jev ultrafast"'
+```
+
+```text
+text helper not running on 127.0.0.1:8899 — starting it (first boot takes ~20s)...
+text helper ready (it exits on its own after idling)
+```
+
+Every `Agent` calls `claude_shim.ensure()` before it opens the browser. If `TEXT_MODEL_BASE_URL` is
+a local port with nothing listening, the shim is started there and waited for — so the ~20s CLI boot
+lands *before* the run's clock starts, instead of inside its first `TYPE_TEXT`. Later runs find it
+already warm and skip the wait entirely. A remote `TEXT_MODEL_BASE_URL` — OpenRouter, DeepSeek — is
+left completely alone, and `JEV_SHIM_AUTOSTART=0` turns the behaviour off.
+
+### Drive it by hand
+
+The server exits on its own after 15 idle minutes, so it never needs stopping. When you do want to
+look at it, the package installs a `jev-shim` command:
+
+```bash
+uv run jev-shim status   # up or down
+uv run jev-shim stop     # stop it now
+uv run jev-shim start    # run it in the foreground, with request logs on stderr
+```
+
+(Drop the `uv run` if the venv is already activated.) A foreground `start` is the one to reach for
+when a run reports the helper never came up: it prints the CLI's own errors instead of sending them
+to `$TMPDIR/claude-cli-shim.log`, which is where the autostarted server logs.
+
 Knobs: `CLAUDE_SHIM_PORT` (8899), `CLAUDE_SHIM_MODEL` (`haiku`), `CLAUDE_SHIM_MAX_TURNS` (8),
-`CLAUDE_SHIM_TIMEOUT` (90s).
+`CLAUDE_SHIM_TIMEOUT` (90s), `CLAUDE_SHIM_IDLE` (900s), `CLAUDE_SHIM_BOOT` (120s).
 
 ### What it costs
 
 - **The CLI boots in roughly 20 seconds.** The shim pays that once at startup by pre-warming a
-  session, so a run's `TYPE_TEXT` requests don't each wait for it.
+  session, so a run's `TYPE_TEXT` requests don't each wait for it — and because it binds its port
+  only after the warm-up, an open port always means a ready helper.
 - **It is a CLI, not a low-latency API model.** The 7.1-second Flights run above assumes the API
   text helper; expect a slower number here. The decision loop is unchanged — the added time is all
   in text generation.

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from .browser import Browser, StalePage
+from .claude_shim import ensure as ensure_text_helper
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
@@ -15,6 +16,10 @@ class Agent:
         if not task:
             raise ValueError("Supply a task")
         plan = [task]
+        # The text helper is a dependency of TYPE_TEXT, so it comes up before the browser and
+        # before the clock starts. A remote helper is left alone; a dead local one is fatal here
+        # rather than 20 seconds into a timed run.
+        ensure_text_helper()
         self.pending_text = None
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None

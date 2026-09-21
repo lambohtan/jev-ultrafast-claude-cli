@@ -1,35 +1,55 @@
 """OpenAI-compatible /chat/completions endpoint backed by the local `claude` CLI.
 
-Point TEXT_MODEL_BASE_URL at this server to use a Claude Code subscription as the
-text helper instead of a paid API key. Only the fields jev-ultrafast sends are
-honoured: `model`, `messages` (one system + one user), and the JSON-object
-response contract. Sampling, reasoning, and streaming parameters are ignored.
+The text helper is a runtime dependency of the agent loop: `TYPE_TEXT` cannot run
+without one. So this fork owns the helper's lifecycle rather than leaving it to
+whoever happens to call the agent — `ensure()` runs at the start of every `Agent`,
+starts this server if `TEXT_MODEL_BASE_URL` points at a local port nobody is
+listening on, and does nothing at all when the helper is a remote API.
 
-The CLI costs ~20s to boot, so one session is kept warm and reused. Each request
-is prefixed with an isolation instruction and the session is recycled after
-MAX_TURNS turns to keep earlier requests from bleeding into later ones.
+Only the fields jev-ultrafast sends are honoured: `model`, `messages` (one system +
+one user), and the JSON-object response contract. Sampling, reasoning, and streaming
+parameters are ignored.
+
+The CLI costs ~20s to boot, so one session is kept warm and reused. Each request is
+prefixed with an isolation instruction and the session is recycled after MAX_TURNS
+turns to keep earlier requests from bleeding into later ones. The server exits by
+itself once idle, so an autostarted helper never outlives its usefulness.
 """
 
-import importlib.util
 import json
 import os
 import re
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+from .questions import TEXT_VALUE
 
 PORT = int(os.environ.get("CLAUDE_SHIM_PORT", "8899"))
 MODEL = os.environ.get("CLAUDE_SHIM_MODEL", "haiku")
 MAX_TURNS = int(os.environ.get("CLAUDE_SHIM_MAX_TURNS", "8"))
 TIMEOUT = float(os.environ.get("CLAUDE_SHIM_TIMEOUT", "90"))
+IDLE_EXIT = float(os.environ.get("CLAUDE_SHIM_IDLE", "900"))  # leave no process behind after 15 idle minutes
+BOOT_BUDGET = float(os.environ.get("CLAUDE_SHIM_BOOT", "120"))
+LOG = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-cli-shim.log"
+
+LAST_REQUEST = time.monotonic()
 
 ISOLATION = (
     "New independent request. Ignore every earlier message in this conversation; "
     "they were unrelated requests. Answer only from the JSON below.\n\n"
 )
+
+
+class ShimUnavailable(RuntimeError):
+    """The text helper never came up. Nothing ran, so this says nothing about the task."""
 
 
 class Session:
@@ -131,6 +151,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        global LAST_REQUEST
+        LAST_REQUEST = time.monotonic()
         if not self.path.rstrip("/").endswith("/chat/completions"):
             return self._reply(404, {"error": {"message": f"no route for {self.path}"}})
         length = int(self.headers.get("Content-Length", "0"))
@@ -167,31 +189,124 @@ class Handler(BaseHTTPRequestHandler):
 def prewarm():
     """Pay the ~20s CLI boot before the agent needs it, not during the first TYPE_TEXT."""
     global SESSION
-    questions = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "jev_ultrafast", "questions.py")
-    spec = importlib.util.spec_from_file_location("jev_questions", questions)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # questions.py imports nothing, so this stays cheap
-    SESSION = Session(module.TEXT_VALUE)
+    SESSION = Session(TEXT_VALUE)
     started = time.perf_counter()
     SESSION.ask(ISOLATION + json.dumps({"goal": "warm up", "field": {}, "page": {}, "recent_actions": []}))
     print(f"warm after {time.perf_counter() - started:.1f}s", flush=True)
 
 
-def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"claude CLI shim on http://127.0.0.1:{PORT}/v1  (model: {MODEL})", flush=True)
-    print("Set TEXT_MODEL_BASE_URL to that URL.", flush=True)
+def watch_idle():
+    while True:
+        time.sleep(30)
+        if time.monotonic() - LAST_REQUEST > IDLE_EXIT:
+            print(f"idle for {IDLE_EXIT:.0f}s — shutting down", flush=True)
+            shutdown()
+
+
+def shutdown(*_signal):
+    if SESSION:
+        SESSION.kill()
+    os._exit(0)
+
+
+def serve():
+    """Run the server in the foreground until it is stopped or goes idle."""
+    signal.signal(signal.SIGTERM, shutdown)
+    # Prewarm BEFORE binding: callers treat an open port as "ready", so the port must not
+    # open while the CLI is still booting.
     try:
         prewarm()
     except Exception as error:
         print(f"prewarm skipped ({error}); the first request pays the boot cost instead", flush=True)
+    threading.Thread(target=watch_idle, daemon=True).start()
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"READY: claude CLI shim on http://127.0.0.1:{PORT}/v1  (model: {MODEL}, "
+          f"exits after {IDLE_EXIT:.0f}s idle)", flush=True)
+    print("Set TEXT_MODEL_BASE_URL to that URL.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        if SESSION:
-            SESSION.kill()
+        shutdown()
+
+
+# --- lifecycle, used by Agent and by the `jev-shim` command ---------------------------------
+
+
+def local_target():
+    """The host:port this shim would serve, or None when the text helper is somewhere else.
+
+    An unset TEXT_MODEL_BASE_URL is a remote default (see model.field_text), not this shim,
+    so it must not autostart anything.
+    """
+    parsed = urlparse(os.environ.get("TEXT_MODEL_BASE_URL", ""))
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return None
+    return parsed.hostname, parsed.port or 80
+
+
+def listening(host, port):
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        return probe.connect_ex((host, port)) == 0
+
+
+def start_background(host, port):
+    """Boot the shim detached and wait for the port. It binds only after prewarming."""
+    print(f"text helper not running on {host}:{port} — starting it (first boot takes ~20s)...", flush=True)
+    with open(LOG, "a") as log:
+        subprocess.Popen(
+            [sys.executable, "-m", "jev_ultrafast.claude_shim"],
+            stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+            start_new_session=True,  # outlives this run, so later runs skip the boot
+        )
+    deadline = time.monotonic() + BOOT_BUDGET
+    while time.monotonic() < deadline:
+        if listening(host, port):
+            print("text helper ready (it exits on its own after idling)", flush=True)
+            return
+        time.sleep(0.5)
+    raise ShimUnavailable(f"the claude CLI shim did not come up within {BOOT_BUDGET:.0f}s; see {LOG}")
+
+
+def ensure():
+    """Make the local text helper available, or explain why it is not. No-op for remote helpers."""
+    if os.environ.get("JEV_SHIM_AUTOSTART", "1").lower() in {"0", "false", "no"}:
+        return None
+    target = local_target()
+    if target is None or listening(*target):
+        return target
+    start_background(*target)
+    return target
+
+
+def stop():
+    """Stop a running shim. Returns how many processes were signalled."""
+    found = subprocess.run(["pgrep", "-f", "jev_ultrafast.claude_shim|jev-shim"],
+                           capture_output=True, text=True).stdout.split()
+    stopped = 0
+    for pid in found:
+        if int(pid) == os.getpid():  # `jev-shim stop` matches its own command line
+            continue
+        os.kill(int(pid), signal.SIGTERM)
+        stopped += 1
+    return stopped
+
+
+def main(argv=None):
+    command = (argv if argv is not None else sys.argv[1:])[:1] or ["start"]
+    if command[0] == "stop":
+        print(f"stopped {stop()} shim process(es)")
+        return 0
+    if command[0] == "status":
+        host, port = local_target() or ("127.0.0.1", PORT)
+        print(f"claude CLI shim on {host}:{port}: " + ("up" if listening(host, port) else "down"))
+        return 0
+    if command[0] != "start":
+        print(f"usage: jev-shim [start|status|stop]  (got {command[0]!r})")
+        return 2
+    serve()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
