@@ -6,6 +6,11 @@ Do not repeat satisfied steps. Fill required fields before submitting. A typed q
 its matching autocomplete suggestion selected. For date pickers, CLICK the field, date, then confirmation.
 Set every requested filter/control; a matching result alone does not prove a requested filter was set.
 Do not toggle a checkbox, switch, or radio already in the requested state.
+A slider reports the value it currently reads, and SET_RANGE moves it from there by a percentage of
+its track. A reading rises with the slider. Recent actions show what each move landed on: use two
+readings to judge what a percent is worth, then pick the step that covers the remaining distance.
+Move lower when it reads too high and higher when it reads too low, and take a smaller step as it
+gets closer. Repeating a move that already overshot will overshoot again.
 Submit populated search fields before opening a result; a populated field alone is not an applied search.
 WAIT only when the needed control is absent/disabled, or submitted results are still loading.
 If Search/Submit is visible and the required fields are ready, CLICK it immediately.

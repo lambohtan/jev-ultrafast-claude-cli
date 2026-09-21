@@ -86,7 +86,7 @@ class Browser:
         raise StalePage("Page did not settle")
 
     def fresh(self, page, action=None):
-        if action is not None and action["kind"] in {"click", "select"}:
+        if action is not None and action["kind"] in {"click", "select", "range"}:
             node = action["node"]
             if type(node) is not int:
                 return False
@@ -117,6 +117,10 @@ def fingerprint(state):
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
+# Kinds that mutate through a dispatched event: an interrupted one must never be retried.
+VALUE_KINDS = {"select": "Dropdown", "range": "Slider"}
+
+
 def browser_operation(request):
     operation = request["operation"]
     session = request["session"]
@@ -127,8 +131,9 @@ def browser_operation(request):
     def evaluate(expression):
         result = call("Runtime.evaluate", expression=expression, returnByValue=True)
         if result.get("exceptionDetails"):
-            if operation == "act" and request["action"]["kind"] == "select":
-                raise RuntimeError("Dropdown execution was interrupted; inspect before retrying.")
+            if operation == "act" and request["action"]["kind"] in VALUE_KINDS:
+                noun = VALUE_KINDS[request["action"]["kind"]]
+                raise RuntimeError(f"{noun} execution was interrupted; inspect before retrying.")
             raise StalePage("Document changed during evaluation")
         return result.get("result", {}).get("value")
 
@@ -143,12 +148,13 @@ def browser_operation(request):
             # Code-owned node IDs refer to actual observed elements, never model-generated selectors.
             target = evaluate("""(action => {
               const e=window.__jevFast?.nodes.get(action.node);
+              const proxied=e?.tagName==='INPUT' && e.type==='range';
               if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
-                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
+                  !e.checkVisibility({checkOpacity:!proxied,checkVisibilityCSS:true})) return null;
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
               const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
               if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              if (!proxied && !e.contains(document.elementFromPoint(x,y))) return null;
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                     !o.disabled && !o.closest('optgroup[disabled]'))) return null;
@@ -156,13 +162,21 @@ def browser_operation(request):
                 e.dispatchEvent(new Event('input',{bubbles:true}));
                 e.dispatchEvent(new Event('change',{bubbles:true}));
               }
+              if (action.kind==='range') {
+                if (!proxied || e.readOnly) return null;
+                const v=Number(action.value), min=Number(e.min||0), max=Number(e.max===''?100:e.max);
+                if (!Number.isFinite(v) || v<min || v>max) return null;
+                e.value=action.value;
+                e.dispatchEvent(new Event('input',{bubbles:true}));
+                e.dispatchEvent(new Event('change',{bubbles:true}));
+              }
               return {x,y};
             })(""" + json.dumps(action) + ")")
             if target is None:
-                if kind == "select":
-                    raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
+                if kind in VALUE_KINDS:
+                    raise RuntimeError(f"{VALUE_KINDS[kind]} execution was not confirmed; inspect before retrying.")
                 raise StalePage("Target changed or is covered. Observe again.")
-            if kind != "select":
+            if kind not in VALUE_KINDS:
                 x, y = target["x"], target["y"]
                 for event in ("mousePressed", "mouseReleased"):
                     call("Input.dispatchMouseEvent", type=event, x=x, y=y, button="left", clickCount=1)

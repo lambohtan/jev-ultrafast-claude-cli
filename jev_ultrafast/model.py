@@ -48,7 +48,7 @@ def validate_choice(answer, ids):
 def action_space(actions):
     """One index per observed element; each operation has its own valid target choices."""
     elements, indices, targets, controls = [], {}, {}, {}
-    operations = {"click": "CLICK", "fill": "TYPE_TEXT", "select": "SELECT"}
+    operations = {"click": "CLICK", "fill": "TYPE_TEXT", "select": "SELECT", "range": "SET_RANGE"}
     for action in actions:
         kind = action["kind"]
         if kind not in operations:
@@ -60,7 +60,7 @@ def action_space(actions):
             indices[node] = index
             element = {k: action[k] for k in ("role", "value", "checked", "selected", "expanded") if k in action}
             element.update(index=index, label=action["label"].split(" → ")[0], operations=[])
-            if kind == "select":
+            if kind in ("select", "range"):
                 element["value"] = action.get("current_value", "")
                 element["options"] = []
             elements.append(element)
@@ -71,7 +71,7 @@ def action_space(actions):
         if operation not in element["operations"]:
             element["operations"].append(operation)
         target = index
-        if kind == "select":
+        if kind in ("select", "range"):
             target = f"{index}:{len(element['options']) + 1}"
             element["options"].append({"index": target, "label": action["label"], "value": action["value"]})
         group[target] = action
@@ -84,6 +84,8 @@ def choose(state, goal, history):
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
         "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
         "SELECT": "Select an observed dropdown value.",
+        "SET_RANGE": "Move a slider to an offered position on its track. The element shows the value it\n"
+        "currently reads; the page decides what a position means, so read the new value and correct it.",
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})

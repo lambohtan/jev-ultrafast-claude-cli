@@ -79,7 +79,10 @@ def main():
           <button id="off" disabled>Disabled</button>
           <select id="category" aria-label="Category">
             <option>All</option><option>Design</option><option disabled>Unavailable</option>
-          </select></form><aside id="unrelated">News</aside>
+          </select>
+          <input id="budget" type="range" min="0" max="100" step="5" value="0" aria-label="Max price"
+                 aria-valuetext="$0" style="opacity:0;pointer-events:none">
+          </form><aside id="unrelated">News</aside>
         """))
         page = browser.observe(screenshot=False)
         buy = next(a for a in page["actions"] if a["label"] == "Buy")
@@ -112,6 +115,46 @@ def main():
         browser.act(select, page)
         assert browser.evaluate("document.querySelector('#category').value") == "Design"
         passed.append("native dropdown selects an observed option")
+
+        # A slider is routinely transparent and pointer-events:none under a custom thumb.
+        page = browser.observe(screenshot=False)
+        stops = [a for a in page["actions"] if a["kind"] == "range"]
+        assert stops, "A transparent range input must still be observed"
+        assert {a["role"] for a in stops} == {"slider"}
+        assert all(a["current_value"] == "$0" for a in stops)
+        values = [float(a["value"]) for a in stops]
+        assert all(0 <= v <= 100 and v % 5 == 0 for v in values), values
+        assert 0 not in values, "The position it already holds is not offered"
+        assert len(values) == len(set(values)), values
+        # It sits at its minimum, so every offer must move it up, and one must reach the far end.
+        assert all(v > 0 for v in values) and 100 in values, values
+        assert any("higher by 5% of its track" in a["label"] for a in stops), [a["label"] for a in stops]
+        passed.append("transparent slider offers distinct relative moves, not its own position")
+
+        browser.evaluate("window.events=[]; for (const type of ['input','change']) "
+                         "document.querySelector('#budget').addEventListener(type,e=>window.events.push(e.type))")
+        stop = next(a for a in stops if a["value"] == "50")
+        browser.act(stop, page)
+        assert browser.evaluate("document.querySelector('#budget').value") == "50"
+        assert browser.evaluate("window.events") == ["input", "change"]
+        passed.append("slider moves to an observed position and notifies the page")
+
+        page = browser.observe(screenshot=False)
+        stop = next(a for a in page["actions"] if a["kind"] == "range")
+        try:
+            browser.act({**stop, "value": "1000"}, page)
+        except (RuntimeError, StalePage):
+            pass
+        else:
+            raise AssertionError("A value outside the track was accepted")
+        assert browser.evaluate("document.querySelector('#budget').value") == "50"
+        passed.append("a value outside the track is rejected without moving the slider")
+
+        page = browser.observe(screenshot=False)
+        stop = next(a for a in page["actions"] if a["kind"] == "range")
+        browser.evaluate("document.querySelector('#budget').value='20'")
+        assert not browser.fresh(page, stop)
+        passed.append("slider movement invalidates action-specific guard")
 
         browser.evaluate("document.querySelector('#query').addEventListener('input',()=>setTimeout(()=>{"
                          "document.querySelector('#suggestions').innerHTML='<div role=option>Generated</div>'"
