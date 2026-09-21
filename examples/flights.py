@@ -3,14 +3,23 @@
 import argparse
 import base64
 import json
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from jev_ultrafast import Agent
 
 URL = "https://www.google.com/travel/flights?hl=en"
+# Derived, never hardcoded: a fixed date silently expires, and the run then fails on a calendar
+# that cannot offer the past — a stale test reading as a broken agent. Every label below comes
+# from this one date, so the goal and the checks cannot drift apart.
+DEPARTURE = date.today() + timedelta(days=30)
+ISO = DEPARTURE.isoformat()                          # 2026-10-21
+SHORT = f"{DEPARTURE:%a, %b} {DEPARTURE.day}"        # Wed, Oct 21   (no %-d: not portable)
+LONG = f"{DEPARTURE:%A, %B} {DEPARTURE.day}"         # Wednesday, October 21
 GOALS = (
-    "Find one-way flights from Zurich to London on September 20, 2026, for one adult in economy. "
+    f"Find one-way flights from Zurich to London on {DEPARTURE:%B} {DEPARTURE.day}, "
+    f"{DEPARTURE.year}, for one adult in economy. "
     "Stop when matching flight options are visible. Do not select or book a flight."
 )
 
@@ -20,7 +29,7 @@ def verify(page):
     parsed = urlparse(page["url"])
     encoded = parse_qs(parsed.query).get("tfs", [""])[0]
     try:
-        date_in_url = b"2026-09-20" in base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        date_in_url = ISO.encode() in base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
     except ValueError:
         date_in_url = False
     actions = page["actions"]
@@ -31,9 +40,9 @@ def verify(page):
         "one_way": values.get("Change ticket type. One way") == "One way",
         "origin": values.get("Where from?") == "Zürich",
         "destination": values.get("Where to?") == "London",
-        "date": values.get("Departure") == "Sun, Sep 20",
-        "year": date_in_url or "departing 2026-09-20" in page["text"],
-        "results": bool(flights) and all("Sunday, September 20" in f for f in flights),
+        "date": values.get("Departure") == SHORT,
+        "year": date_in_url or f"departing {ISO}" in page["text"],
+        "results": bool(flights) and all(LONG in f for f in flights),
     }
     return {"passed": all(checks.values()), "checks": checks, "visible_flights": flights}
 
