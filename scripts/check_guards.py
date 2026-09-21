@@ -124,6 +124,31 @@ def main():
         assert value == "Generated", repr(value)
         assert any(a.get("role") == "option" for a in page["actions"])
         passed.append("real text input waits for asynchronous combobox suggestions")
+        # A page routinely marks its whole app root aria-hidden while a dialog is open, and renders
+        # the dialog inside that same root. A month strip clips its own overflow.
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <div id="app" aria-hidden="true">
+            <button id="background">Background</button>
+            <div role="dialog">
+              <button id="confirm">Confirm</button>
+              <span aria-hidden="true"><button>Decoration</button></span>
+              <div style="width:100px;overflow:hidden;white-space:nowrap">
+                <button style="width:80px">Shown day</button><button style="width:80px">Clipped day</button>
+              </div>
+            </div>
+          </div>
+        """))
+        page = browser.observe(screenshot=False)
+        labels = {a["label"] for a in page["actions"]}
+        assert "Confirm" in labels, "A dialog inside an aria-hidden root is still on screen"
+        assert "Background" not in labels, "The root's aria-hidden still hides what is outside the dialog"
+        assert "Decoration" not in labels, "aria-hidden inside the dialog still hides"
+        assert "Confirm" in page["text"], "Text in that dialog is readable too"
+        passed.append("a dialog inside an aria-hidden root is observed; the root behind it is not")
+
+        assert "Shown day" in labels and "Clipped day" not in labels, labels
+        passed.append("a control scrolled out of an overflow container is not offered")
+
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

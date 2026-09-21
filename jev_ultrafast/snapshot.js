@@ -7,8 +7,14 @@
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
   const safe = e => !['password','file','hidden'].includes(e.type);
-  const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
-    e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  const shown = e => e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  // A dialog can render inside an app root the page marks aria-hidden while the dialog is open.
+  // Within a shown dialog, only aria-hidden inside that dialog conceals an element.
+  const concealed = e => {
+    const dialog=e.closest('dialog,[role="dialog"]'), marked=e.closest('[aria-hidden="true"]');
+    return dialog && shown(dialog) ? !!(marked && dialog.contains(marked)) : !!marked;
+  };
+  const visible = e => !concealed(e) && !e.closest('[inert]') && shown(e);
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
@@ -20,6 +26,23 @@
       (e.tagName==='INPUT' ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
         n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
       e.getAttribute('title') || e.getAttribute('placeholder') || '';
+  };
+  // An element scrolled out of an overflow container keeps an on-screen rect but cannot be hit.
+  // Unlike covering, clipping does not change when a sibling merely moves.
+  const clips = new Map();
+  const clipRect = n => {
+    if (!n) return null;
+    if (clips.has(n)) return clips.get(n);
+    let box = clipRect(n.parentElement);
+    const style = getComputedStyle(n);
+    if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+      const c = n.getBoundingClientRect();
+      box = box ? {l:Math.max(box.l,c.left),t:Math.max(box.t,c.top),
+                   r:Math.min(box.r,c.right),b:Math.min(box.b,c.bottom)}
+                : {l:c.left,t:c.top,r:c.right,b:c.bottom};
+    }
+    clips.set(n, box);
+    return box;
   };
   const roles=['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
     'option','gridcell','combobox','textbox','searchbox','spinbutton'];
@@ -57,6 +80,8 @@
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    const clip=clipRect(e.parentElement);
+    if (clip && (x<clip.l || x>clip.r || y<clip.t || y>clip.b)) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
