@@ -7,7 +7,10 @@
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
   const safe = e => !['password','file','hidden'].includes(e.type);
-  const shown = e => e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  // A range input is routinely painted transparent under a custom thumb and left pointer-events:none.
+  // It is driven by value, never clicked, so its own opacity says nothing about whether it works.
+  const proxied = e => e.tagName==='INPUT' && e.type==='range';
+  const shown = e => e.checkVisibility({checkOpacity:!proxied(e),checkVisibilityCSS:true});
   // A dialog can render inside an app root the page marks aria-hidden while the dialog is open.
   // Within a shown dialog, only aria-hidden inside that dialog conceals an element.
   const concealed = e => {
@@ -61,6 +64,7 @@
       if (e.type==='search') return 'searchbox';
       if (e.type==='number') return 'spinbutton';
       if (['text','email','url','tel'].includes(e.type)) return 'textbox';
+      if (e.type==='range') return 'slider';
     }
     return null;
   };
@@ -75,6 +79,7 @@
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
+  const STEPS=[1,2,5,10,25,50];
   const actions=[];
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
@@ -94,6 +99,30 @@
       for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
         actions.push({...base,kind:'select',value:o.value,
           current_value:[...e.selectedOptions].map(o=>o.label).join(', '),label:base.label+' → '+o.label});
+    } else if (rname==='slider') {
+      // The page, not the track, decides what a position reads as. A reading is monotonic in the
+      // value, so offer moves from where it sits now. Steps are fractions of the whole track, so a
+      // step means the same near either end; halving toward an end leaves no small correction.
+      const min=Number(e.min||0), max=Number(e.max===''?100:e.max), step=Number(e.step)||1;
+      const current=Number(e.value), reading=e.getAttribute('aria-valuetext')||String(e.value);
+      const snap=v=>String(Number(Math.min(max,Math.max(min,
+        min+Math.round((v-min)/step)*step)).toFixed(6)));
+      const seen=new Set([snap(current)]);
+      const offer=(raw,label)=>{
+        const value=snap(raw);
+        if (seen.has(value)) return;
+        seen.add(value);
+        actions.push({...base,kind:'range',value,current_value:reading,label:base.label+' \u2192 '+label});
+      };
+      if (!e.readOnly && max>min) {
+        for (const percent of STEPS) {
+          const distance=(max-min)*percent/100;
+          offer(current-distance, 'lower by '+percent+'% of its track');
+          offer(current+distance, 'higher by '+percent+'% of its track');
+        }
+        offer(min,'all the way to its minimum');
+        offer(max,'all the way to its maximum');
+      }
     } else {
       const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&
         (['textbox','searchbox','spinbutton'].includes(rname) ||

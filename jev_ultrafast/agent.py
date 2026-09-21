@@ -151,6 +151,14 @@ class Agent:
                 url=state["page"]["url"],
                 elapsed_ms=state["elapsed_ms"],
             )
+            if action["kind"] == "range":
+                # A relative move means nothing without what it landed on; record the page's reading
+                # so the history shows the search instead of a list of directions.
+                moved = next(
+                    (a for a in state["page"]["actions"] if a.get("node") == action["node"] and a["kind"] == "range"),
+                    None,
+                )
+                state["history"][-1]["text"] = moved["current_value"] if moved else None
             if state["record"]:
                 (self.record_dir / f"{state['elapsed_ms']:06d}.jpg").write_bytes(
                     base64.b64decode(state["page"]["screenshot"])
