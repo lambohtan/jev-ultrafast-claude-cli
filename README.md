@@ -2,6 +2,11 @@
 
 # Jev Ultrafast ⚡
 
+> [!NOTE]
+> **This is a fork of [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast).**
+> One change: the small LLM that writes text can be your local `claude` CLI instead of a second paid
+> API key. Everything else is upstream. → [Why this fork](#why-this-fork)
+
 > [!IMPORTANT]
 > **The Browser Use Cloud waitlist is open.** Get early access to ultrafast browser agents in the cloud.
 > **[Join the waitlist →](https://browser-use.com/ultrafast?utm_source=github&utm_medium=readme&utm_campaign=jev-ultrafast)**
@@ -15,6 +20,65 @@ Give it one goal. [TypeSafe's Jev](https://docs.typesafe.ai/introduction) picks 
 <a href="docs/demo.mp4"><img src="docs/demo.gif" alt="A real Google Flights search at 1× speed, with generated city names and dynamic operation/target decisions" width="100%" /></a>
 
 [Watch the MP4](docs/demo.mp4) · [Measurements](docs/performance.md) · [Read the loop](jev_ultrafast/agent.py)
+
+## Why this fork
+
+Upstream needs two credentials, and they are not equally easy to come by:
+
+| Credential | What it buys | Substitute |
+| --- | --- | --- |
+| `TYPESAFE_API_KEY` | Jev picks the operation and the element — the entire policy | None. This fork does not touch it. |
+| `TEXT_MODEL_API_KEY` | A small LLM writes the field value, and only when the operation is `TYPE_TEXT` | **This fork.** |
+
+The second one does a narrow job. When the agent decides `TYPE_TEXT [3]`, something has to turn the
+goal into the string `Zürich`. Upstream routes that through an OpenAI-compatible endpoint — an
+OpenRouter key in the example config. So running the demo meant opening a second paid account to
+generate a few short strings per run.
+
+If you already have Claude Code, you already have a model that can write those strings.
+
+So this fork adds **[`scripts/claude_cli_shim.py`](scripts/claude_cli_shim.py)**: an
+OpenAI-compatible `/chat/completions` server on `127.0.0.1`, backed by the local `claude` CLI. It
+speaks only the slice of the API that jev-ultrafast actually uses — `model`, one system message, one
+user message, and a JSON-object reply — so the agent loop cannot tell the difference. Sampling,
+reasoning, and streaming parameters are ignored. Nothing else in the repository changes, which keeps
+pulling upstream clean.
+
+### Use it
+
+Start the shim and leave it running:
+
+```bash
+python scripts/claude_cli_shim.py
+```
+
+Then point the text helper at it in `.env`:
+
+```bash
+TEXT_MODEL_BASE_URL=http://127.0.0.1:8899/v1
+TEXT_MODEL=haiku           # a name the claude CLI accepts, not an OpenRouter slug
+TEXT_MODEL_API_KEY=unused  # never sent anywhere, but it must be set
+```
+
+Both comments matter. `TEXT_MODEL` is forwarded straight to `claude --model`, so an OpenRouter-style
+slug like `inception/mercury-2.5` will fail. And `TEXT_MODEL_API_KEY` has to be non-empty because
+[`model.py`](jev_ultrafast/model.py) refuses `TYPE_TEXT` without it — that guard exists so no field
+text is ever silently guessed — but the shim ignores the value.
+
+Knobs: `CLAUDE_SHIM_PORT` (8899), `CLAUDE_SHIM_MODEL` (`haiku`), `CLAUDE_SHIM_MAX_TURNS` (8),
+`CLAUDE_SHIM_TIMEOUT` (90s).
+
+### What it costs
+
+- **The CLI boots in roughly 20 seconds.** The shim pays that once at startup by pre-warming a
+  session, so a run's `TYPE_TEXT` requests don't each wait for it.
+- **It is a CLI, not a low-latency API model.** The 7.1-second Flights run above assumes the API
+  text helper; expect a slower number here. The decision loop is unchanged — the added time is all
+  in text generation.
+- **Sessions are recycled.** One warm `claude` session serves requests and is replaced every
+  `MAX_TURNS` turns, and every request is prefixed with an instruction to ignore earlier ones, so
+  one run's text does not bleed into the next.
+- **`TYPESAFE_API_KEY` is still required.** This fork replaces the text helper, not the policy.
 
 ## The action space
 
